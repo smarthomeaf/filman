@@ -1,0 +1,272 @@
+
+from __future__ import annotations
+from typing import Any, Dict, Iterable, Set, List, Optional
+import re, logging, time
+
+from homeassistant.components.select import SelectEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+from .const import DOMAIN, ADD_SIGNAL, REMOVE_SIGNAL, UPDATE_SIGNAL
+from .store import SpoolStore
+
+_LOGGER = logging.getLogger(__name__)
+
+ZB_DOMAINS: Set[str] = {"zha", "zigbee2mqtt", "deconz"}
+
+
+def _friendly_device_label(device: dr.DeviceEntry) -> str:
+    name = device.name_by_user or device.name or "Unnamed"
+    short_id = device.id.split("-")[0]
+    return f"{name} ({short_id})"
+
+
+def _is_filamenty(text: str) -> bool:
+    return re.search(r"filament|filmanet", text, re.IGNORECASE) is not None
+
+
+def _domains_from_identifiers(identifiers: Iterable[tuple]) -> Set[str]:
+    domains: Set[str] = set()
+    for ident in identifiers or []:
+        if not isinstance(ident, (list, tuple)) or not ident:
+            continue
+        dom = ident[0]
+        if isinstance(dom, str):
+            domains.add(dom)
+    return domains
+
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
+    """Set up selects for existing spools; add/remove dynamically via dispatcher."""
+    store: SpoolStore = hass.data[DOMAIN][entry.entry_id]
+
+    entities: List[SelectEntity] = []
+    for spool in store.all().values():
+        entities.extend(
+            [
+                FilamentLinkSelect(entry, store, spool),
+                FilamentSpoolmanIdSelect(entry, store, spool),
+            ]
+        )
+
+    if entities:
+        async_add_entities(entities)
+
+    async def _on_add(spool_id: str) -> None:
+        data = store.all()[spool_id]
+        async_add_entities(
+            [
+                FilamentLinkSelect(entry, store, data),
+                FilamentSpoolmanIdSelect(entry, store, data),
+            ]
+        )
+
+    async def _on_remove(spool_id: str) -> None:
+        # Your existing removal is no-op; keeping parity
+        return
+
+    entry.async_on_unload(async_dispatcher_connect(hass, ADD_SIGNAL, _on_add))
+    entry.async_on_unload(async_dispatcher_connect(hass, REMOVE_SIGNAL, _on_remove))
+
+
+class BaseSpoolSelect(SelectEntity):
+    _attr_has_entity_name = True
+
+    def __init__(self, entry: ConfigEntry, store: SpoolStore, data: dict[str, Any]) -> None:
+        self._entry = entry
+        self._store = store
+        self._data = dict(data)
+        self.spool_id = data["id"]
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.spool_id)},
+            name=self._data.get("name", "Filament Spool"),
+            manufacturer=self._data.get("brand", "Unknown"),
+            model=self._data.get("type", "Filament"),
+            suggested_area=self._data.get("location") or None,
+        )
+
+    def refresh_from_store(self) -> None:
+        self._data = self._store.all().get(self.spool_id, self._data)
+
+
+class FilamentLinkSelect(BaseSpoolSelect):
+    """Your known-working Zigbee linker with inline humidity capture preserved."""
+
+    _attr_name = "Linked Zigbee Device"
+    _attr_icon = "mdi:zigbee"
+
+    def __init__(self, entry: ConfigEntry, store: SpoolStore, data: dict[str, Any]) -> None:
+        super().__init__(entry, store, data)
+        self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_link"
+        self._options_map: Dict[str, str] = {}
+        self._attr_options = ["None"]
+
+    async def async_added_to_hass(self) -> None:
+        self._rebuild_options()
+        self.async_write_ha_state()
+
+    def _rebuild_options(self) -> None:
+        dev_reg = dr.async_get(self.hass)
+        filtered: Dict[str, str] = {}
+        for device in dev_reg.devices.values():
+            domains = _domains_from_identifiers(device.identifiers)
+            if not (domains & ZB_DOMAINS):
+                continue
+            label = _friendly_device_label(device)
+            if _is_filamenty(label):
+                filtered[label] = device.id
+        self._options_map = {"None": ""}
+        for label in sorted(filtered.keys(), key=str.lower):
+            self._options_map[label] = filtered[label]
+        self._attr_options = list(self._options_map.keys())
+
+    @property
+    def current_option(self) -> str | None:
+        self.refresh_from_store()
+        if not getattr(self, "_options_map", None) or not getattr(self, "_attr_options", None):
+            self._rebuild_options()
+        current_id = self._store.all().get(self.spool_id, {}).get("zigbee_device_id") or ""
+        for label, dev_id in self._options_map.items():
+            if dev_id == current_id:
+                return label
+        return "None"
+
+    async def async_select_option(self, option: str) -> None:
+        if not getattr(self, "_options_map", None):
+            self._rebuild_options()
+        dev_id = self._options_map.get(option, "")
+
+        # Save Zigbee device id
+        await self._store.update(self.spool_id, zigbee_device_id=(dev_id or None))
+
+        # Inline humidity resolution (preserves old behavior)
+        humidity_entity_id = None
+        if dev_id:
+            ent_reg = er.async_get(self.hass)
+            candidates: List[str] = []
+            for ent in ent_reg.entities.values():
+                if ent.device_id != dev_id or ent.domain != "sensor":
+                    continue
+                nm = (ent.original_name or "").lower()
+                if "humidity" in ent.entity_id or "humidity" in nm:
+                    candidates.append(ent.entity_id)
+            if candidates:
+                candidates.sort()
+                humidity_entity_id = candidates[0]
+
+        await self._store.update(self.spool_id, humidity_entity_id=humidity_entity_id)
+        async_dispatcher_send(self.hass, UPDATE_SIGNAL, self.spool_id)
+        self.async_write_ha_state()
+
+
+class FilamentSpoolmanIdSelect(BaseSpoolSelect):
+    """Spoolman link — only fetches when entity is added/used; no work at import."""
+
+    _attr_name = "Linked Spoolman Spool ID"
+    _attr_icon = "mdi:identifier"
+
+    def __init__(self, entry: ConfigEntry, store: SpoolStore, data: dict[str, Any]) -> None:
+        super().__init__(entry, store, data)
+        self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_spoolman_id"
+        self._options_map: Dict[str, int] = {}
+        self._attr_options = ["Unlinked"]
+        self._last_rebuild_ts = 0.0
+
+    async def async_added_to_hass(self) -> None:
+        await self._rebuild_options()
+        self.async_write_ha_state()
+
+    async def _fetch_json(self, path: str) -> Optional[dict | list]:
+        url = (self._entry.options or {}).get("spoolman_url")
+        if not url:
+            return None
+        api = f"{url.rstrip('/')}{path}"
+        session = async_get_clientsession(self.hass)
+        headers = {}
+        api_key = (self._entry.options or {}).get("spoolman_api_key")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            async with session.get(api, timeout=20, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning("Spoolman API HTTP %s from %s", resp.status, api)
+                    return None
+                return await resp.json()
+        except Exception as e:
+            _LOGGER.warning("Spoolman API error for %s: %s", api, e)
+            return None
+
+    async def _rebuild_options(self) -> None:
+        self._last_rebuild_ts = time.time()
+        data = await self._fetch_json("/api/v1/spool?archived=false")
+        if not data:
+            self._options_map = {}
+            self._attr_options = ["Unlinked"]
+            return
+        if isinstance(data, dict) and "items" in data:
+            items = data["items"]
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
+
+        options: Dict[str, int] = {}
+        for sp in items:
+            sp_id = sp.get("id")
+            fil = sp.get("filament") or {}
+            vendor = (fil.get("vendor") or {}).get("name") or ""
+            material = fil.get("material") or ""
+            color = fil.get("name") or fil.get("color_name") or ""
+            parts = [str(sp_id)]
+            pretty = " · ".join([p for p in [vendor, material, color] if p])
+            if pretty:
+                parts.append(pretty)
+            label = " - ".join(parts)
+            if sp_id is not None:
+                options[label] = sp_id
+
+        self._options_map = options
+        self._attr_options = ["Unlinked"] + list(options.keys()) if options else ["Unlinked"]
+
+    @property
+    def current_option(self) -> str | None:
+        self.refresh_from_store()
+        current = self._store.all().get(self.spool_id, {}).get("spoolman_id")
+        if not current:
+            return "Unlinked"
+        for label, sp_id in self._options_map.items():
+            if sp_id == current:
+                return label
+        return "Unlinked"
+
+    async def async_select_option(self, option: str) -> None:
+        if option == "Unlinked":
+            await self._store.update(self.spool_id, spoolman_id=None)
+            async_dispatcher_send(self.hass, UPDATE_SIGNAL, self.spool_id)
+            self.async_write_ha_state()
+            return
+
+        sp_id = self._options_map.get(option)
+        await self._store.update(self.spool_id, spoolman_id=sp_id)
+
+        # Fetch spool detail and update Color in your store
+        detail = await self._fetch_json(f"/api/v1/spool/{sp_id}")
+        if isinstance(detail, dict):
+            fil = detail.get("filament") or {}
+            color_name = fil.get("name") or fil.get("color_name")
+            if isinstance(color_name, str) and color_name.strip():
+                await self._store.update(self.spool_id, color=color_name.strip())
+
+        async_dispatcher_send(self.hass, UPDATE_SIGNAL, self.spool_id)
+        self.async_write_ha_state()

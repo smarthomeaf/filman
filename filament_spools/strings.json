@@ -1,0 +1,11 @@
+{
+  "title": "Filament Spools",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Enable Filament Spools",
+        "description": "Create a simple store for your filament spools."
+      }
+    }
+  }
+}

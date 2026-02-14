@@ -1,0 +1,180 @@
+from __future__ import annotations
+from typing import Any, Dict, DefaultDict, List, Optional, Tuple, Callable
+from collections import defaultdict
+import re
+
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_track_state_change_event
+
+from .const import DOMAIN, ADD_SIGNAL, UPDATE_SIGNAL, REMOVE_SIGNAL
+from .store import SpoolStore
+
+ENTITIES: DefaultDict[str, Dict[str, List['BaseSpoolSensor']]] = defaultdict(dict)
+
+SENSOR_DEFS = [
+    ("brand", "Brand", "mdi:label"),
+    ("type", "Type", "mdi:alpha-t-box-outline"),
+    ("color", "Color", "mdi:palette"),
+    ("location", "Location", "mdi:map-marker"),
+]
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+    store: SpoolStore = hass.data[DOMAIN][entry.entry_id]
+
+    def build_entities_for_spool(spool: dict[str, Any]) -> list[SensorEntity]:
+        ents: list[SensorEntity] = []
+        for key, title, icon in SENSOR_DEFS:
+            ents.append(TextFieldSensor(entry, store, spool, key=key, title=title, icon=icon))
+        ents.append(LinkedHumiditySensor(entry, store, spool))
+        return ents
+
+    all_ents: list[SensorEntity] = []
+    for spool in store.all().values():
+        ents = build_entities_for_spool(spool)
+        if ents:
+            ENTITIES[entry.entry_id][spool["id"]] = ents
+            all_ents.extend(ents)
+    if all_ents:
+        async_add_entities(all_ents)
+
+    async def _on_add(spool_id: str) -> None:
+        spool = store.all()[spool_id]
+        ents = build_entities_for_spool(spool)
+        ENTITIES[entry.entry_id][spool_id] = ents
+        async_add_entities(ents)
+
+    async def _on_update(spool_id: str) -> None:
+        ents = ENTITIES.get(entry.entry_id, {}).get(spool_id, [])
+        for ent in ents:
+            if hasattr(ent, "refresh_from_store"):
+                ent.refresh_from_store()
+            ent.async_write_ha_state()
+
+    async def _on_remove(spool_id: str) -> None:
+        ents = ENTITIES.get(entry.entry_id, {}).pop(spool_id, [])
+        for ent in ents:
+            await ent.async_remove()
+
+    entry.async_on_unload(async_dispatcher_connect(hass, ADD_SIGNAL, _on_add))
+    entry.async_on_unload(async_dispatcher_connect(hass, UPDATE_SIGNAL, _on_update))
+    entry.async_on_unload(async_dispatcher_connect(hass, REMOVE_SIGNAL, _on_remove))
+
+class BaseSpoolSensor(SensorEntity):
+    _attr_has_entity_name = True
+    def __init__(self, entry: ConfigEntry, store: SpoolStore, data: dict[str, Any]) -> None:
+        self._entry = entry
+        self._store = store
+        self._data = dict(data)
+        self.spool_id = data["id"]
+
+    def refresh_from_store(self) -> None:
+        self._data = self._store.all().get(self.spool_id, self._data)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.spool_id)},
+            name=self._data.get("name", "Filament Spool"),
+            manufacturer=self._data.get("brand", "Unknown"),
+            model=self._data.get("type", "Filament"),
+            suggested_area=self._data.get("location") or None,
+        )
+
+class TextFieldSensor(BaseSpoolSensor):
+    def __init__(self, entry: ConfigEntry, store: SpoolStore, data: dict[str, Any], *, key: str, title: str, icon: str) -> None:
+        super().__init__(entry, store, data)
+        self._key = key
+        self._attr_name = title
+        self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_{key}"
+        self._attr_icon = icon
+    @property
+    def native_value(self) -> str | None:
+        return self._data.get(self._key)
+
+class LinkedHumiditySensor(BaseSpoolSensor):
+    _attr_name = "Linked Humidity"
+    _attr_icon = "mdi:water-percent"
+    _attr_device_class = SensorDeviceClass.HUMIDITY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "%"
+
+    def __init__(self, entry: ConfigEntry, store: SpoolStore, data: dict[str, Any]) -> None:
+        super().__init__(entry, store, data)
+        self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_linked_humidity"
+        self._last_pick: Optional[str] = None
+        self._unsub_state: Optional[Callable] = None
+
+    async def async_added_to_hass(self) -> None:
+        self._relink_listener()
+
+    def _parse_percent(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        s = str(value).strip()
+        import re as _re
+        m = _re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*%?\s*$", s)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                return None
+        return None
+
+    def _pick_humidity_entity_id(self) -> Optional[str]:
+        from homeassistant.helpers import entity_registry as er
+        dev_id = self._store.all().get(self.spool_id, {}).get("zigbee_device_id")
+        if not dev_id:
+            return None
+        reg = er.async_get(self.hass)
+        candidates = [ent.entity_id for ent in reg.entities.values() if ent.device_id == dev_id and ent.domain == "sensor"]
+        best_eid = None
+        best_score = -1
+        for eid in candidates:
+            st = self.hass.states.get(eid)
+            if not st:
+                continue
+            name = str(st.attributes.get("friendly_name", "") or st.name or "").lower()
+            dc = st.attributes.get("device_class")
+            unit = st.attributes.get("unit_of_measurement")
+            if dc == "battery" or "battery" in name:
+                continue
+            score = 0
+            if dc == "humidity": score += 100
+            if "humidity" in name or "humid" in name: score += 50
+            if unit == "%": score += 5
+            if score > best_score:
+                best_score, best_eid = score, eid
+        return best_eid
+
+    def _relink_listener(self) -> None:
+        from homeassistant.core import callback
+        from homeassistant.helpers.event import async_track_state_change_event
+        if self._unsub_state:
+            self._unsub_state()
+            self._unsub_state = None
+        self._last_pick = self._pick_humidity_entity_id()
+        if not self._last_pick:
+            self.async_write_ha_state(); return
+        @callback
+        def _state_cb(event) -> None:
+            self.async_write_ha_state()
+        self._unsub_state = async_track_state_change_event(self.hass, [self._last_pick], _state_cb)
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> Optional[float]:
+        eid = self._last_pick
+        if not eid:
+            return None
+        st = self.hass.states.get(eid)
+        if not st:
+            return None
+        return self._parse_percent(st.state)

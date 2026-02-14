@@ -1,0 +1,19 @@
+{
+  "domain": "filament_spools",
+  "name": "Filament Spools",
+  "version": "0.6.0",
+  "documentation": "https://example.invalid",
+  "codeowners": [
+    "@you"
+  ],
+  "iot_class": "local_polling",
+  "requirements": [],
+  "config_flow": true,
+  "loggers": [
+    "custom_components.filament_spools"
+  ],
+  "platforms": [
+    "sensor",
+    "select"
+  ]
+}

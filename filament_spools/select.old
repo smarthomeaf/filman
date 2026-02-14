@@ -1,0 +1,208 @@
+from __future__ import annotations
+from typing import Any, Dict, Iterable, Set, List
+import re
+
+from homeassistant.components.select import SelectEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
+
+from .const import DOMAIN
+from .store import SpoolStore
+from . import const
+from .const import ADD_SIGNAL, REMOVE_SIGNAL, UPDATE_SIGNAL
+
+ZB_DOMAINS: Set[str] = {"zha", "zigbee2mqtt", "deconz"}
+
+def _friendly_device_label(device: dr.DeviceEntry) -> str:
+    name = device.name_by_user or device.name or "Unnamed"
+    short_id = device.id.split("-")[0]
+    return f"{name} ({short_id})"
+
+def _is_filamenty(text: str) -> bool:
+    return re.search(r"filament|filmanet", text, re.IGNORECASE) is not None
+
+def _domains_from_identifiers(identifiers: Iterable[tuple]) -> Set[str]:
+    domains: Set[str] = set()
+    for ident in identifiers or []:
+        if not isinstance(ident, (list, tuple)) or not ident:
+            continue
+        dom = ident[0]
+        if isinstance(dom, str):
+            domains.add(dom)
+    return domains
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+    store: SpoolStore = hass.data[DOMAIN][entry.entry_id]
+
+    entities: List[SelectEntity] = []
+    for spool in store.all().values():
+        entities.extend([
+            FilamentLinkSelect(entry, store, spool),
+            FilamentBrandSelect(entry, store, spool),
+            FilamentTypeSelect(entry, store, spool),
+            FilamentColorSelect(entry, store, spool),
+            FilamentLocationSelect(entry, store, spool),
+        ])
+
+    if entities:
+        async_add_entities(entities)
+
+    async def _on_add(spool_id: str) -> None:
+        data = store.all()[spool_id]
+        async_add_entities([
+            FilamentLinkSelect(entry, store, data),
+            FilamentBrandSelect(entry, store, data),
+            FilamentTypeSelect(entry, store, data),
+            FilamentColorSelect(entry, store, data),
+            FilamentLocationSelect(entry, store, data),
+        ])
+
+    async def _on_remove(spool_id: str) -> None:
+        return
+
+    entry.async_on_unload(async_dispatcher_connect(hass, ADD_SIGNAL, _on_add))
+    entry.async_on_unload(async_dispatcher_connect(hass, REMOVE_SIGNAL, _on_remove))
+
+class BaseSpoolSelect(SelectEntity):
+    _attr_has_entity_name = True
+
+    def __init__(self, entry: ConfigEntry, store: SpoolStore, data: dict[str, Any]) -> None:
+        self._entry = entry
+        self._store = store
+        self._data = dict(data)
+        self.spool_id = data["id"]
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.spool_id)},
+            name=self._data.get("name", "Filament Spool"),
+            manufacturer=self._data.get("brand", "Unknown"),
+            model=self._data.get("type", "Filament"),
+            suggested_area=self._data.get("location") or None,
+        )
+
+    def refresh_from_store(self) -> None:
+        self._data = self._store.all().get(self.spool_id, self._data)
+
+class FilamentLinkSelect(BaseSpoolSelect):
+    _attr_name = "Linked Zigbee Device"
+    _attr_icon = "mdi:zigbee"
+
+    def __init__(self, entry: ConfigEntry, store: SpoolStore, data: dict[str, Any]) -> None:
+        super().__init__(entry, store, data)
+        self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_link"
+        self._options_map: Dict[str, str] = {}
+        self._attr_options = ["None"]
+
+    async def async_added_to_hass(self) -> None:
+        self._rebuild_options()
+        self.async_write_ha_state()
+
+    def _rebuild_options(self) -> None:
+        dev_reg = dr.async_get(self.hass)
+        filtered: Dict[str, str] = {}
+        for device in dev_reg.devices.values():
+            domains = _domains_from_identifiers(device.identifiers)
+            if not (domains & ZB_DOMAINS):
+                continue
+            label = _friendly_device_label(device)
+            if _is_filamenty(label):
+                filtered[label] = device.id
+        self._options_map = {"None": ""}
+        for label in sorted(filtered.keys(), key=str.lower):
+            self._options_map[label] = filtered[label]
+        self._attr_options = list(self._options_map.keys())
+
+    @property
+    def current_option(self) -> str | None:
+        self.refresh_from_store()
+        if not getattr(self, "_options_map", None) or not getattr(self, "_attr_options", None):
+            self._rebuild_options()
+        current_id = self._store.all().get(self.spool_id, {}).get("zigbee_device_id") or ""
+        for label, dev_id in self._options_map.items():
+            if dev_id == current_id:
+                return label
+        return "None"
+
+    async def async_select_option(self, option: str) -> None:
+        if not getattr(self, "_options_map", None):
+            self._rebuild_options()
+        dev_id = self._options_map.get(option, "")
+        await self._store.update(self.spool_id, zigbee_device_id=(dev_id or None))
+        from .const import UPDATE_SIGNAL
+        from homeassistant.helpers.dispatcher import async_dispatcher_send
+        async_dispatcher_send(self.hass, UPDATE_SIGNAL, self.spool_id)
+        self.async_write_ha_state()
+
+BRAND_OPTIONS = ["Bambu Labs", "Creality", "Anycubic"]
+
+TYPE_OPTIONS = [
+    "PLA", "PLA+", "PETG", "ABS", "ASA", "TPU",
+    "Nylon (PA)", "PA-CF", "PET", "PCTG", "PC", "HIPS", "PVA"
+]
+
+COLOR_OPTIONS = [
+    "Black", "White", "Gray", "Red", "Orange", "Yellow", "Green", "Blue",
+    "Purple", "Pink", "Brown", "Silver", "Gold", "Cyan", "Magenta", "Transparent"
+]
+
+LOCATION_OPTIONS = ["AMS", "Dryer"] + [f"Filament Box {i}" for i in range(1, 17)]
+
+class _SimpleStoreBackedSelect(BaseSpoolSelect):
+    _field: str = ""
+    _options: List[str] = []
+    _icon: str = "mdi:form-select"
+
+    def __init__(self, entry: ConfigEntry, store: SpoolStore, data: dict[str, Any], unique_suffix: str) -> None:
+        super().__init__(entry, store, data)
+        self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_{unique_suffix}"
+        self._attr_options = self._options
+        self._attr_icon = self._icon
+
+    @property
+    def current_option(self) -> str | None:
+        self.refresh_from_store()
+        val = (self._data.get(self._field) or "").strip()
+        for opt in self._options:
+            if val.lower() == opt.lower():
+                return opt
+        return None
+
+    async def async_select_option(self, option: str) -> None:
+        await self._store.update(self.spool_id, **{self._field: option})
+        from homeassistant.helpers.dispatcher import async_dispatcher_send
+        async_dispatcher_send(self.hass, UPDATE_SIGNAL, self.spool_id)
+        self.async_write_ha_state()
+
+class FilamentBrandSelect(_SimpleStoreBackedSelect):
+    _attr_name = "Brand"
+    _field = "brand"
+    _options = BRAND_OPTIONS
+    _icon = "mdi:label"
+    def __init__(self, entry, store, data): super().__init__(entry, store, data, "brand_select")
+
+class FilamentTypeSelect(_SimpleStoreBackedSelect):
+    _attr_name = "Type"
+    _field = "type"
+    _options = TYPE_OPTIONS
+    _icon = "mdi:alpha-t-box-outline"
+    def __init__(self, entry, store, data): super().__init__(entry, store, data, "type_select")
+
+class FilamentColorSelect(_SimpleStoreBackedSelect):
+    _attr_name = "Color"
+    _field = "color"
+    _options = COLOR_OPTIONS
+    _icon = "mdi:palette"
+    def __init__(self, entry, store, data): super().__init__(entry, store, data, "color_select")
+
+class FilamentLocationSelect(_SimpleStoreBackedSelect):
+    _attr_name = "Location"
+    _field = "location"
+    _options = LOCATION_OPTIONS
+    _icon = "mdi:map-marker"
+    def __init__(self, entry, store, data): super().__init__(entry, store, data, "location_select")

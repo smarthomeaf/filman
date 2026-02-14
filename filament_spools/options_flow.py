@@ -1,0 +1,32 @@
+
+from __future__ import annotations
+from typing import Any
+import voluptuous as vol
+from homeassistant import config_entries
+from .const import DOMAIN
+
+CONF_SPOOLMAN_URL = "spoolman_url"
+CONF_SPOOLMAN_API_KEY = "spoolman_api_key"
+CONF_MATCH_STRATEGY = "spoolman_match"
+
+MATCH_OPTS = {
+    "brand_type_color": "Brand + Type + Color (recommended)",
+    "location": "Location only",
+}
+
+class OptionsFlowHandler(config_entries.OptionsFlow):
+    def __init__(self, entry: config_entries.ConfigEntry) -> None:
+        # Use a non-reserved attribute to avoid deprecation warnings
+        self._entry = entry
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None):
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        opts = (self._entry.options or {})
+        schema = vol.Schema({
+            vol.Required(CONF_SPOOLMAN_URL, default=opts.get(CONF_SPOOLMAN_URL, "")): str,
+            vol.Optional(CONF_SPOOLMAN_API_KEY, default=opts.get(CONF_SPOOLMAN_API_KEY, "")): str,
+            vol.Required(CONF_MATCH_STRATEGY, default=opts.get(CONF_MATCH_STRATEGY, "brand_type_color")): vol.In(list(MATCH_OPTS.keys())),
+        })
+        return self.async_show_form(step_id="init", data_schema=schema)

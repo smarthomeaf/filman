@@ -1,0 +1,48 @@
+add_spool:
+  name: Add spool
+  description: Create a new filament spool record
+  fields:
+    name:
+      description: Name of the spool
+      example: Bambu PLA Koala Gray
+      required: true
+    brand:
+      description: Brand
+      example: Bambu Labs
+    type:
+      description: Material type
+      example: PLA
+    color:
+      description: Color
+      example: Gray
+    location:
+      description: Where it lives
+      example: Filament Box 3
+
+update_spool:
+  name: Update spool
+  description: Update an existing filament spool by id
+  fields:
+    id:
+      description: Spool id (from attributes or storage)
+      required: true
+    name:
+      description: New name
+    brand:
+      description: New brand
+    type:
+      description: New type
+    color:
+      description: New color
+    location:
+      description: New location
+    zigbee_device_id:
+      description: Link to a device id
+
+remove_spool:
+  name: Remove spool
+  description: Delete a filament spool by id
+  fields:
+    id:
+      description: Spool id
+      required: true
