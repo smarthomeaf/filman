@@ -1,5 +1,5 @@
 {
-  "name": "Filmanent Manager",
+  "name": "Filament Manager",
   "content_in_root": false,
   "domains": ["filman"],
   "homeassistant": "2024.6.0",
