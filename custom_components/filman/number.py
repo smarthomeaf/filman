@@ -69,7 +69,7 @@ class _BaseFilmanNumber(NumberEntity):
 
 
 class FilmanCountControl(_BaseFilmanNumber):
-    """Writable control for filament.extra.count (stored on the filament object)."""
+    """Writable control for filament.extra.count (normalized to filament.count by coordinator)."""
 
     _attr_name = "Count Control"
     _attr_icon = "mdi:counter"
@@ -91,10 +91,8 @@ class FilmanCountControl(_BaseFilmanNumber):
         d = (self.coord.data or {}).get(int(self.spool_id)) or {}
         filament = d.get("filament") or {}
         val = filament.get("count")
-
         if val is None or val == "":
             return None
-
         try:
             return float(int(val))
         except (ValueError, TypeError):
@@ -108,6 +106,16 @@ class FilmanCountControl(_BaseFilmanNumber):
             _LOGGER.warning("Cannot set count: missing filament.id for spool %s", self.spool_id)
             return
 
+        _LOGGER.debug(
+            "Setting Spoolman filament.extra.count: filament_id=%s value=%s",
+            filament_id,
+            int(value),
+        )
+
         ok = await self.coord.async_set_filament_count(int(filament_id), int(value))
         if not ok:
-            _LOGGER.warning("Failed to set filament count for filament_id=%s", filament_id)
+            _LOGGER.warning(
+                "Failed to set filament.extra.count for filament_id=%s (spool %s)",
+                filament_id,
+                self.spool_id,
+            )
