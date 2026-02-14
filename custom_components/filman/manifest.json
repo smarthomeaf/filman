@@ -1,7 +1,7 @@
 {
   "domain": "filman",
-  "name": "Filman – Spoolman Filament Inventory",
-  "version": "v0.1.4",
+  "name": "Filmanent Manager",
+  "version": "v0.1.5",
   "documentation": "https://github.com/smarthomeaf/filman",
   "issue_tracker": "https://github.com/smarthomeaf/filman/issues",
   "codeowners": ["@smarthomeaf"],
