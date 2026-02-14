@@ -10,12 +10,18 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from homeassistant.const import UnitOfDensity
-
 from .const import DOMAIN, UPDATE_SIGNAL
 from .coordinator import FilmanCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# Unit fallback for older HA versions (or if UnitOfDensity isn't present)
+try:
+    from homeassistant.const import UnitOfDensity
+
+    DENSITY_UNIT = UnitOfDensity.GRAMS_PER_CUBIC_CENTIMETER
+except Exception:
+    DENSITY_UNIT = "g/cm³"
 
 
 async def async_setup_entry(
@@ -25,7 +31,7 @@ async def async_setup_entry(
     coord: FilmanCoordinator = data["coordinator"]
 
     entities: List[SensorEntity] = []
-    for sid, sp in coord.data.items():
+    for _, sp in coord.data.items():
         entities.extend(
             [
                 FilmanManufacturerSensor(hass, entry, coord, sp),
@@ -54,17 +60,18 @@ class _BaseFilmanSensor(SensorEntity):
         self.hass = hass
         self.entry = entry
         self.coord = coord
-        self.spool = spool
         self.spool_id = str(spool["id"])
 
     @property
     def device_info(self) -> DeviceInfo:
+        # Build device info off current coordinator data, not the initial snapshot
+        d = self.coord.data.get(int(self.spool_id)) or {}
         return DeviceInfo(
             identifiers={(DOMAIN, self.spool_id)},
             name=f"Spool {self.spool_id}",
-            manufacturer=self.spool.get("manufacturer") or "Unknown",
-            model=str(self.spool.get("filament_type") or "Filament"),
-            suggested_area=self.spool.get("location") or None,
+            manufacturer=d.get("manufacturer") or "Unknown",
+            model=str(d.get("filament_type") or "Filament"),
+            suggested_area=d.get("location") or None,
         )
 
     @property
@@ -72,8 +79,9 @@ class _BaseFilmanSensor(SensorEntity):
         return True
 
     @callback
-    def _on_update(self, spool_id: str) -> None:
-        if spool_id != self.spool_id:
+    def _on_update(self, spool_id: str | None = None) -> None:
+        # IMPORTANT: dispatcher may fire with no args; don't crash setup
+        if spool_id is not None and spool_id != self.spool_id:
             return
         self.async_write_ha_state()
 
@@ -121,12 +129,12 @@ class FilmanTypeSensor(_BaseFilmanSensor):
 
 
 class FilmanDensitySensor(_BaseFilmanSensor):
-    """Density is sourced from the filament object (not the spool)."""
+    """Density sourced from filament.density (g/cm³)."""
 
     _attr_name = "Density"
     _attr_icon = "mdi:weight"
     _attr_device_class = SensorDeviceClass.DENSITY
-    _attr_native_unit_of_measurement = UnitOfDensity.GRAMS_PER_CUBIC_CENTIMETER
+    _attr_native_unit_of_measurement = DENSITY_UNIT
 
     def __init__(self, hass, entry, coord, spool) -> None:
         super().__init__(hass, entry, coord, spool)
@@ -159,7 +167,9 @@ class FilmanHumiditySensor(_BaseFilmanSensor):
         super().__init__(hass, entry, coord, spool)
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_humidity"
         self._store = hass.data[DOMAIN][entry.entry_id]["store"]
-        self.async_on_remove(async_dispatcher_connect(self.hass, UPDATE_SIGNAL, self._on_update))
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, UPDATE_SIGNAL, self._on_update)
+        )
 
     @property
     def native_unit_of_measurement(self):
@@ -189,7 +199,9 @@ class FilmanTemperatureSensor(_BaseFilmanSensor):
         super().__init__(hass, entry, coord, spool)
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_temperature"
         self._store = hass.data[DOMAIN][entry.entry_id]["store"]
-        self.async_on_remove(async_dispatcher_connect(self.hass, UPDATE_SIGNAL, self._on_update))
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, UPDATE_SIGNAL, self._on_update)
+        )
 
     @property
     def native_unit_of_measurement(self):
