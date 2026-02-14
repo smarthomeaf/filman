@@ -40,29 +40,61 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
         return headers
 
     async def _async_request(self, method: str, path: str, json_body: dict | None = None):
-        """Low-level request helper. Returns parsed JSON or None."""
+        """Low-level request helper.
+
+        Returns:
+          - dict/list (parsed JSON) when provided
+          - {} when request succeeded but returned no JSON (e.g., 204 No Content)
+          - None on failure
+        """
         url = self._base_url()
         if not url:
+            _LOGGER.warning("Spoolman base URL missing; cannot call %s %s", method, path)
             return None
 
         api = f"{url.rstrip('/')}{path}"
         session = async_get_clientsession(self.hass)
         headers = self._headers()
 
-        async with session.request(
-            method,
-            api,
-            timeout=20,
-            headers=headers,
-            json=json_body,
-        ) as resp:
-            if resp.status < 200 or resp.status >= 300:
-                _LOGGER.warning("Spoolman HTTP %s for %s %s", resp.status, method, api)
-                return None
-            try:
-                return await resp.json()
-            except Exception:
-                return None
+        try:
+            async with session.request(
+                method,
+                api,
+                timeout=20,
+                headers=headers,
+                json=json_body,
+            ) as resp:
+                # Non-2xx -> log body for debugging
+                if resp.status < 200 or resp.status >= 300:
+                    body = await resp.text()
+                    _LOGGER.warning(
+                        "Spoolman HTTP %s for %s %s. Response: %s",
+                        resp.status,
+                        method,
+                        api,
+                        body[:500],
+                    )
+                    return None
+
+                # 204 = success with no content
+                if resp.status == 204:
+                    return {}
+
+                # Try JSON; if not JSON but still success, treat as success
+                try:
+                    return await resp.json()
+                except Exception:
+                    body = await resp.text()
+                    _LOGGER.debug(
+                        "Spoolman %s %s succeeded but returned non-JSON body: %s",
+                        method,
+                        api,
+                        body[:500],
+                    )
+                    return {}
+        except Exception as e:
+            _LOGGER.warning("Spoolman request failed: %s %s (%s)", method, api, e)
+            return None
 
     async def _async_fetch(self, path: str):
         return await self._async_request("GET", path)
@@ -73,11 +105,11 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
     async def async_set_filament_count(self, filament_id: int, count: int) -> bool:
         """Update filament.extra.count in Spoolman.
 
-        Note: Spoolman treats `extra` as replace-on-write. If you send `extra`, any existing
-        extra fields are replaced with what you send (so we GET first, mutate, then PATCH).
+        Spoolman treats `extra` as replace-on-write, so we GET first, mutate, then PATCH.
         """
         filament = await self._async_fetch(f"/api/v1/filament/{filament_id}")
         if not isinstance(filament, dict):
+            _LOGGER.warning("Failed to GET filament %s before updating count", filament_id)
             return False
 
         extra = filament.get("extra") or {}
@@ -90,12 +122,14 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
             f"/api/v1/filament/{filament_id}",
             {"extra": extra},
         )
-        if not isinstance(updated, dict):
+        if updated is None:
+            _LOGGER.warning("PATCH filament %s failed when updating extra.count", filament_id)
             return False
 
         # Update local coordinator cache for any spools that reference this filament_id
         data = dict(self.data or {})
         changed = False
+
         for sid, sp in data.items():
             fil = sp.get("filament") or {}
             if fil.get("id") != filament_id:
@@ -104,6 +138,7 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
             fil = dict(fil)
             fil["count"] = int(count)
             fil["extra"] = extra
+
             sp = dict(sp)
             sp["filament"] = fil
             data[sid] = sp
