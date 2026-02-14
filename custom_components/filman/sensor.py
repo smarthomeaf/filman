@@ -1,6 +1,6 @@
-
 from __future__ import annotations
-from typing import Any, Dict, List
+
+from typing import Any, List
 import logging
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
@@ -8,32 +8,49 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
+from homeassistant.const import UnitOfDensity
 
 from .const import DOMAIN, UPDATE_SIGNAL
 from .coordinator import FilmanCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
     data = hass.data[DOMAIN][entry.entry_id]
     coord: FilmanCoordinator = data["coordinator"]
 
     entities: List[SensorEntity] = []
     for sid, sp in coord.data.items():
-        entities.extend([
-            FilmanManufacturerSensor(hass, entry, coord, sp),
-            FilmanColorSensor(hass, entry, coord, sp),
-            FilmanTypeSensor(hass, entry, coord, sp),
-            FilmanHumiditySensor(hass, entry, coord, sp),
-            FilmanTemperatureSensor(hass, entry, coord, sp),
-        ])
+        entities.extend(
+            [
+                FilmanManufacturerSensor(hass, entry, coord, sp),
+                FilmanColorSensor(hass, entry, coord, sp),
+                FilmanTypeSensor(hass, entry, coord, sp),
+                FilmanDensitySensor(hass, entry, coord, sp),  # NEW
+                FilmanHumiditySensor(hass, entry, coord, sp),
+                FilmanTemperatureSensor(hass, entry, coord, sp),
+            ]
+        )
+
     if entities:
         async_add_entities(entities)
 
+
 class _BaseFilmanSensor(SensorEntity):
     _attr_has_entity_name = True
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coord: FilmanCoordinator, spool: dict[str, Any]) -> None:
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        coord: FilmanCoordinator,
+        spool: dict[str, Any],
+    ) -> None:
         self.hass = hass
         self.entry = entry
         self.coord = coord
@@ -60,51 +77,94 @@ class _BaseFilmanSensor(SensorEntity):
             return
         self.async_write_ha_state()
 
+
 class FilmanManufacturerSensor(_BaseFilmanSensor):
     _attr_name = "Manufacturer"
     _attr_icon = "mdi:factory"
+
     def __init__(self, hass, entry, coord, spool) -> None:
         super().__init__(hass, entry, coord, spool)
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_manufacturer"
+
     @property
     def native_value(self):
         d = self.coord.data.get(int(self.spool_id)) or {}
         return d.get("manufacturer")
 
+
 class FilmanColorSensor(_BaseFilmanSensor):
     _attr_name = "Color"
     _attr_icon = "mdi:palette"
+
     def __init__(self, hass, entry, coord, spool) -> None:
         super().__init__(hass, entry, coord, spool)
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_color"
+
     @property
     def native_value(self):
         d = self.coord.data.get(int(self.spool_id)) or {}
         return d.get("color")
 
+
 class FilmanTypeSensor(_BaseFilmanSensor):
     _attr_name = "Filament Type"
     _attr_icon = "mdi:alpha-t-box-outline"
+
     def __init__(self, hass, entry, coord, spool) -> None:
         super().__init__(hass, entry, coord, spool)
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_type"
+
     @property
     def native_value(self):
         d = self.coord.data.get(int(self.spool_id)) or {}
         return d.get("filament_type")
 
+
+class FilmanDensitySensor(_BaseFilmanSensor):
+    """Density is sourced from the filament object (not the spool)."""
+
+    _attr_name = "Density"
+    _attr_icon = "mdi:weight"
+    _attr_device_class = SensorDeviceClass.DENSITY
+    _attr_native_unit_of_measurement = UnitOfDensity.GRAMS_PER_CUBIC_CENTIMETER
+
+    def __init__(self, hass, entry, coord, spool) -> None:
+        super().__init__(hass, entry, coord, spool)
+        self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_density"
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, UPDATE_SIGNAL, self._on_update)
+        )
+
+    @property
+    def native_value(self):
+        d = self.coord.data.get(int(self.spool_id)) or {}
+        filament = d.get("filament") or {}
+        val = filament.get("density")
+
+        if val is None or val == "":
+            return None
+
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
+
+
 class FilmanHumiditySensor(_BaseFilmanSensor):
     _attr_name = "Humidity"
     _attr_icon = "mdi:water-percent"
     _attr_device_class = SensorDeviceClass.HUMIDITY
+
     def __init__(self, hass, entry, coord, spool) -> None:
         super().__init__(hass, entry, coord, spool)
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_humidity"
         self._store = hass.data[DOMAIN][entry.entry_id]["store"]
         self.async_on_remove(async_dispatcher_connect(self.hass, UPDATE_SIGNAL, self._on_update))
+
     @property
     def native_unit_of_measurement(self):
         return "%"
+
     @property
     def native_value(self):
         rec = (self._store.all().get(self.spool_id) or {})
@@ -118,6 +178,7 @@ class FilmanHumiditySensor(_BaseFilmanSensor):
             return float(st.state)
         except (ValueError, TypeError):
             return 0
+
 
 class FilmanTemperatureSensor(_BaseFilmanSensor):
     _attr_name = "Temperature"
