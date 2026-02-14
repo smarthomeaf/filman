@@ -4,7 +4,7 @@ DOMAIN = "filman"
 CONF_SPOOLMAN_URL = "spoolman_url"
 CONF_SPOOLMAN_API_KEY = "spoolman_api_key"
 
-PLATFORMS = ["sensor", "select"]
+PLATFORMS = ["sensor", "select", "number"]
 
 ADD_SIGNAL = f"{DOMAIN}_add_spool"
 REMOVE_SIGNAL = f"{DOMAIN}_remove_spool"

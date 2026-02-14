@@ -8,8 +8,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import CONF_SPOOLMAN_URL, CONF_SPOOLMAN_API_KEY, DOMAIN
+from .const import CONF_SPOOLMAN_URL, CONF_SPOOLMAN_API_KEY, DOMAIN, UPDATE_SIGNAL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,28 +25,95 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
             update_interval=timedelta(minutes=5),
         )
 
-    async def _async_fetch(self, path: str):
-        url = (self.entry.options or {}).get(CONF_SPOOLMAN_URL) or self.entry.data.get(
+    def _base_url(self) -> str | None:
+        return (self.entry.options or {}).get(CONF_SPOOLMAN_URL) or self.entry.data.get(
             CONF_SPOOLMAN_URL
         )
-        if not url:
-            return None
 
-        api = f"{url.rstrip('/')}{path}"
-        session = async_get_clientsession(self.hass)
-
+    def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
         key = (self.entry.options or {}).get(CONF_SPOOLMAN_API_KEY) or self.entry.data.get(
             CONF_SPOOLMAN_API_KEY
         )
         if key:
             headers["Authorization"] = f"Bearer {key}"
+        return headers
 
-        async with session.get(api, timeout=20, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.warning("Spoolman HTTP %s for %s", resp.status, api)
+    async def _async_request(self, method: str, path: str, json_body: dict | None = None):
+        """Low-level request helper. Returns parsed JSON or None."""
+        url = self._base_url()
+        if not url:
+            return None
+
+        api = f"{url.rstrip('/')}{path}"
+        session = async_get_clientsession(self.hass)
+        headers = self._headers()
+
+        async with session.request(
+            method,
+            api,
+            timeout=20,
+            headers=headers,
+            json=json_body,
+        ) as resp:
+            if resp.status < 200 or resp.status >= 300:
+                _LOGGER.warning("Spoolman HTTP %s for %s %s", resp.status, method, api)
                 return None
-            return await resp.json()
+            try:
+                return await resp.json()
+            except Exception:
+                return None
+
+    async def _async_fetch(self, path: str):
+        return await self._async_request("GET", path)
+
+    async def _async_patch(self, path: str, payload: dict):
+        return await self._async_request("PATCH", path, json_body=payload)
+
+    async def async_set_filament_count(self, filament_id: int, count: int) -> bool:
+        """Update filament.extra.count in Spoolman.
+
+        Note: Spoolman treats `extra` as replace-on-write. If you send `extra`, any existing
+        extra fields are replaced with what you send (so we GET first, mutate, then PATCH).
+        """
+        filament = await self._async_fetch(f"/api/v1/filament/{filament_id}")
+        if not isinstance(filament, dict):
+            return False
+
+        extra = filament.get("extra") or {}
+        if not isinstance(extra, dict):
+            extra = {}
+
+        extra["count"] = int(count)
+
+        updated = await self._async_patch(
+            f"/api/v1/filament/{filament_id}",
+            {"extra": extra},
+        )
+        if not isinstance(updated, dict):
+            return False
+
+        # Update local coordinator cache for any spools that reference this filament_id
+        data = dict(self.data or {})
+        changed = False
+        for sid, sp in data.items():
+            fil = sp.get("filament") or {}
+            if fil.get("id") != filament_id:
+                continue
+
+            fil = dict(fil)
+            fil["count"] = int(count)
+            fil["extra"] = extra
+            sp = dict(sp)
+            sp["filament"] = fil
+            data[sid] = sp
+            changed = True
+
+        if changed:
+            self.async_set_updated_data(data)
+            async_dispatcher_send(self.hass, UPDATE_SIGNAL, None)
+
+        return True
 
     async def _async_update_data(self) -> Dict[int, dict]:
         try:
@@ -66,14 +134,14 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
                 continue
 
             fil: dict[str, Any] = sp.get("filament") or {}
+            filament_id = fil.get("id")
+
             vendor = (fil.get("vendor") or {}).get("name")
             color = fil.get("name") or fil.get("color_name")
             ftype = fil.get("material") or fil.get("name")
 
-            # main field
             density = fil.get("density")  # g/cm³
 
-            # custom field: filament.extra.count
             extra = fil.get("extra") or {}
             if not isinstance(extra, dict):
                 extra = {}
@@ -88,9 +156,10 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
                 "color": color,
                 "filament_type": ftype,
                 "filament": {
+                    "id": filament_id,
                     "density": density,
-                    "count": count,   # normalized so sensor.py can use filament.count
-                    "extra": extra,   # keep full extra dict (optional, but handy)
+                    "count": count,
+                    "extra": extra,
                 },
             }
 

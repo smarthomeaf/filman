@@ -1,7 +1,7 @@
 {
   "domain": "filman",
-  "name": "Filament Manager",
-  "version": "v0.1.9",
+  "name": "Filameent Manager",
+  "version": "v0.1.6",
   "documentation": "https://github.com/smarthomeaf/filman",
   "issue_tracker": "https://github.com/smarthomeaf/filman/issues",
   "codeowners": ["@smarthomeaf"],
