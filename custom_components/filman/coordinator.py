@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Any
 import logging
 from datetime import timedelta
 
@@ -9,7 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_SPOOLMAN_URL, DOMAIN
+from .const import CONF_SPOOLMAN_URL, CONF_SPOOLMAN_API_KEY, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,7 +34,14 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
         api = f"{url.rstrip('/')}{path}"
         session = async_get_clientsession(self.hass)
 
-        async with session.get(api, timeout=20) as resp:
+        headers: dict[str, str] = {}
+        key = (self.entry.options or {}).get(CONF_SPOOLMAN_API_KEY) or self.entry.data.get(
+            CONF_SPOOLMAN_API_KEY
+        )
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+
+        async with session.get(api, timeout=20, headers=headers) as resp:
             if resp.status != 200:
                 _LOGGER.warning("Spoolman HTTP %s for %s", resp.status, api)
                 return None
@@ -58,11 +65,20 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
             if sid is None:
                 continue
 
-            fil = sp.get("filament") or {}
+            fil: dict[str, Any] = sp.get("filament") or {}
             vendor = (fil.get("vendor") or {}).get("name")
             color = fil.get("name") or fil.get("color_name")
             ftype = fil.get("material") or fil.get("name")
-            density = fil.get("density")  # g/cm^3
+
+            # main field
+            density = fil.get("density")  # g/cm³
+
+            # custom field: filament.extra.count
+            extra = fil.get("extra") or {}
+            if not isinstance(extra, dict):
+                extra = {}
+
+            count = extra.get("count")
 
             by_id[sid] = {
                 "id": sid,
@@ -73,6 +89,8 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
                 "filament_type": ftype,
                 "filament": {
                     "density": density,
+                    "count": count,   # normalized so sensor.py can use filament.count
+                    "extra": extra,   # keep full extra dict (optional, but handy)
                 },
             }
 
