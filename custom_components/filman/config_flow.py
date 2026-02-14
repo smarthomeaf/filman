@@ -7,12 +7,11 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN, CONF_SPOOLMAN_URL, CONF_SPOOLMAN_API_KEY
+from .const import DOMAIN, CONF_SPOOLMAN_URL
 
 DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_SPOOLMAN_URL): str,
-        vol.Optional(CONF_SPOOLMAN_API_KEY, default=""): str,
     }
 )
 
@@ -20,29 +19,22 @@ DATA_SCHEMA = vol.Schema(
 async def _validate_spoolman_connection(
     hass,
     base_url: str,
-    api_key: str | None,
 ) -> str | None:
-    """Return an error key (cannot_connect/invalid_auth) or None if OK."""
+    """Return an error key (cannot_connect) or None if OK."""
     if not base_url:
         return "cannot_connect"
 
     session = async_get_clientsession(hass)
     url = base_url.rstrip("/") + "/api/v1/spool?archived=false"
 
-    headers: dict[str, str] = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
     try:
-        resp = await session.get(url, timeout=20, headers=headers)
+        resp = await session.get(url, timeout=20)
     except Exception:
         return "cannot_connect"
 
     try:
         # Some servers keep connections open; ensure we close properly.
         async with resp:
-            if resp.status in (401, 403):
-                return "invalid_auth"
             if resp.status != 200:
                 return "cannot_connect"
             # Confirm JSON is parseable (doesn't need strict shape here).
@@ -61,13 +53,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             spoolman_url = user_input.get(CONF_SPOOLMAN_URL, "")
-            api_key = user_input.get(CONF_SPOOLMAN_API_KEY, "")
 
-            err = await _validate_spoolman_connection(self.hass, spoolman_url, api_key)
+            err = await _validate_spoolman_connection(self.hass, spoolman_url)
             if err:
                 errors["base"] = err
             else:
-                return self.async_create_entry(title="Filman", data=user_input)
+                # Store only what we need
+                return self.async_create_entry(
+                    title="Filman",
+                    data={CONF_SPOOLMAN_URL: spoolman_url},
+                )
 
         return self.async_show_form(
             step_id="user",
@@ -96,19 +91,23 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         if user_input is not None:
             spoolman_url = user_input.get(CONF_SPOOLMAN_URL, "")
-            api_key = user_input.get(CONF_SPOOLMAN_API_KEY, "")
 
-            err = await _validate_spoolman_connection(self.hass, spoolman_url, api_key)
+            err = await _validate_spoolman_connection(self.hass, spoolman_url)
             if err:
                 errors["base"] = err
             else:
-                return self.async_create_entry(title="", data=user_input)
+                return self.async_create_entry(
+                    title="",
+                    data={CONF_SPOOLMAN_URL: spoolman_url},
+                )
 
         opts = self._entry.options or self._entry.data
         schema = vol.Schema(
             {
-                vol.Required(CONF_SPOOLMAN_URL, default=opts.get(CONF_SPOOLMAN_URL, "")): str,
-                vol.Optional(CONF_SPOOLMAN_API_KEY, default=opts.get(CONF_SPOOLMAN_API_KEY, "")): str,
+                vol.Required(
+                    CONF_SPOOLMAN_URL,
+                    default=opts.get(CONF_SPOOLMAN_URL, ""),
+                ): str,
             }
         )
 
