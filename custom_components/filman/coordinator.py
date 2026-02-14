@@ -9,7 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_SPOOLMAN_URL, CONF_SPOOLMAN_API_KEY, DOMAIN
+from .const import CONF_SPOOLMAN_URL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,17 +30,11 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
         )
         if not url:
             return None
+
         api = f"{url.rstrip('/')}{path}"
         session = async_get_clientsession(self.hass)
 
-        headers = {}
-        key = (self.entry.options or {}).get(CONF_SPOOLMAN_API_KEY) or self.entry.data.get(
-            CONF_SPOOLMAN_API_KEY
-        )
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-
-        async with session.get(api, timeout=20, headers=headers) as resp:
+        async with session.get(api, timeout=20) as resp:
             if resp.status != 200:
                 _LOGGER.warning("Spoolman HTTP %s for %s", resp.status, api)
                 return None
@@ -68,7 +62,7 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
             vendor = (fil.get("vendor") or {}).get("name")
             color = fil.get("name") or fil.get("color_name")
             ftype = fil.get("material") or fil.get("name")
-            density = fil.get("density")  # NEW: filament density (g/cm^3)
+            density = fil.get("density")  # g/cm^3
 
             by_id[sid] = {
                 "id": sid,
@@ -79,7 +73,7 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
                 "filament_type": ftype,
                 "filament": {
                     "density": density,
-                },  # keep nested so sensor.py can read d["filament"]["density"]
+                },
             }
 
         return by_id
