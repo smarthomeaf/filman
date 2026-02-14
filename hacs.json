@@ -1,0 +1,9 @@
+{
+  "name": "Filman – Spoolman Filament Inventory",
+  "content_in_root": false,
+  "domains": ["filman"],
+  "homeassistant": "2024.6.0",
+  "render_readme": true,
+  "zip_release": true,
+  "filename": "filman.zip"
+}
