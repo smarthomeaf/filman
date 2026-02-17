@@ -5,12 +5,13 @@ import logging
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from .const import DOMAIN
+from .const import DOMAIN, UPDATE_SIGNAL
 from .coordinator import FilmanCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,6 +48,8 @@ async def async_setup_entry(
                 FilmanTypeSensor(entry, coord, sid),
                 FilmanDensitySensor(entry, coord, sid),
                 FilmanQtySensor(entry, coord, sid),
+                # These two read HA entity state based on your Zigbee mapping,
+                # so we also listen for UPDATE_SIGNAL to refresh immediately.
                 FilmanHumiditySensor(hass, entry, coord, sid),
                 FilmanTemperatureSensor(hass, entry, coord, sid),
             ]
@@ -182,6 +185,13 @@ class FilmanHumiditySensor(_BaseFilmanCoordinatorSensor):
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_humidity"
         self._store = hass.data[DOMAIN][entry.entry_id]["store"]
 
+        # ✅ Critical: refresh immediately when the mapping changes
+        self.async_on_remove(async_dispatcher_connect(hass, UPDATE_SIGNAL, self._on_update))
+
+    @callback
+    def _on_update(self, *_):
+        self.async_write_ha_state()
+
     @property
     def native_unit_of_measurement(self):
         return "%"
@@ -211,6 +221,13 @@ class FilmanTemperatureSensor(_BaseFilmanCoordinatorSensor):
         self.hass = hass
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_temperature"
         self._store = hass.data[DOMAIN][entry.entry_id]["store"]
+
+        # ✅ Critical: refresh immediately when the mapping changes
+        self.async_on_remove(async_dispatcher_connect(hass, UPDATE_SIGNAL, self._on_update))
+
+    @callback
+    def _on_update(self, *_):
+        self.async_write_ha_state()
 
     @property
     def native_unit_of_measurement(self):
