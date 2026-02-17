@@ -5,12 +5,12 @@ import logging
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, UPDATE_SIGNAL
+from .const import DOMAIN
 from .coordinator import FilmanCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,20 +36,19 @@ async def async_setup_entry(
     data = hass.data[DOMAIN][entry.entry_id]
     coord: FilmanCoordinator = data["coordinator"]
 
-    # Ensure we have data before creating entities
     await coord.async_config_entry_first_refresh()
 
     entities: List[SensorEntity] = []
-    for _, sp in (coord.data or {}).items():
+    for sid in (coord.data or {}).keys():
         entities.extend(
             [
-                FilmanManufacturerSensor(hass, entry, coord, sp),
-                FilmanColorSensor(hass, entry, coord, sp),
-                FilmanTypeSensor(hass, entry, coord, sp),
-                FilmanDensitySensor(hass, entry, coord, sp),
-                FilmanCountSensor(hass, entry, coord, sp),  # NEW
-                FilmanHumiditySensor(hass, entry, coord, sp),
-                FilmanTemperatureSensor(hass, entry, coord, sp),
+                FilmanManufacturerSensor(entry, coord, sid),
+                FilmanColorSensor(entry, coord, sid),
+                FilmanTypeSensor(entry, coord, sid),
+                FilmanDensitySensor(entry, coord, sid),
+                FilmanQtySensor(entry, coord, sid),
+                FilmanHumiditySensor(hass, entry, coord, sid),
+                FilmanTemperatureSensor(hass, entry, coord, sid),
             ]
         )
 
@@ -63,161 +62,125 @@ async def async_setup_entry(
     async_add_entities(entities, update_before_add=True)
 
 
-class _BaseFilmanSensor(SensorEntity):
+class _BaseFilmanCoordinatorSensor(CoordinatorEntity[FilmanCoordinator], SensorEntity):
+    """Base sensor that updates automatically when the coordinator refreshes."""
     _attr_has_entity_name = True
 
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        coord: FilmanCoordinator,
-        spool: dict[str, Any],
-    ) -> None:
-        self.hass = hass
+    def __init__(self, entry: ConfigEntry, coord: FilmanCoordinator, spool_id: int) -> None:
+        super().__init__(coord)
         self.entry = entry
-        self.coord = coord
-        self.spool = spool
-        self.spool_id = str(spool["id"])
+        self.spool_id = str(spool_id)
+
+    def _spool(self) -> dict[str, Any]:
+        return (self.coordinator.data or {}).get(int(self.spool_id), {}) or {}
 
     @property
     def device_info(self) -> DeviceInfo:
+        d = self._spool()
         return DeviceInfo(
             identifiers={(DOMAIN, self.spool_id)},
             name=f"Spool {self.spool_id}",
-            manufacturer=self.spool.get("manufacturer") or "Unknown",
-            model=str(self.spool.get("filament_type") or "Filament"),
-            suggested_area=self.spool.get("location") or None,
+            manufacturer=d.get("manufacturer") or "Unknown",
+            model=str(d.get("filament_type") or "Filament"),
+            suggested_area=d.get("location") or None,
         )
 
-    @property
-    def available(self) -> bool:
-        # Keep as-is (you can optionally tie this to coord.last_update_success later)
-        return True
 
-    @callback
-    def _on_update(self, spool_id: str | None = None) -> None:
-        # Dispatcher may fire with no args; don't crash
-        if spool_id is not None and spool_id != self.spool_id:
-            return
-        self.async_write_ha_state()
-
-
-class FilmanManufacturerSensor(_BaseFilmanSensor):
+class FilmanManufacturerSensor(_BaseFilmanCoordinatorSensor):
     _attr_name = "Manufacturer"
     _attr_icon = "mdi:factory"
 
-    def __init__(self, hass, entry, coord, spool) -> None:
-        super().__init__(hass, entry, coord, spool)
+    def __init__(self, entry, coord, spool_id: int) -> None:
+        super().__init__(entry, coord, spool_id)
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_manufacturer"
 
     @property
     def native_value(self):
-        d = (self.coord.data or {}).get(int(self.spool_id)) or {}
-        return d.get("manufacturer")
+        return self._spool().get("manufacturer")
 
 
-class FilmanColorSensor(_BaseFilmanSensor):
+class FilmanColorSensor(_BaseFilmanCoordinatorSensor):
     _attr_name = "Color"
     _attr_icon = "mdi:palette"
 
-    def __init__(self, hass, entry, coord, spool) -> None:
-        super().__init__(hass, entry, coord, spool)
+    def __init__(self, entry, coord, spool_id: int) -> None:
+        super().__init__(entry, coord, spool_id)
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_color"
 
     @property
     def native_value(self):
-        d = (self.coord.data or {}).get(int(self.spool_id)) or {}
-        return d.get("color")
+        return self._spool().get("color")
 
 
-class FilmanTypeSensor(_BaseFilmanSensor):
+class FilmanTypeSensor(_BaseFilmanCoordinatorSensor):
     _attr_name = "Filament Type"
     _attr_icon = "mdi:alpha-t-box-outline"
 
-    def __init__(self, hass, entry, coord, spool) -> None:
-        super().__init__(hass, entry, coord, spool)
+    def __init__(self, entry, coord, spool_id: int) -> None:
+        super().__init__(entry, coord, spool_id)
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_type"
 
     @property
     def native_value(self):
-        d = (self.coord.data or {}).get(int(self.spool_id)) or {}
-        return d.get("filament_type")
+        return self._spool().get("filament_type")
 
 
-class FilmanDensitySensor(_BaseFilmanSensor):
+class FilmanDensitySensor(_BaseFilmanCoordinatorSensor):
     """Density sourced from filament.density (g/cm³)."""
-
     _attr_name = "Density"
     _attr_icon = "mdi:weight"
     _attr_native_unit_of_measurement = DENSITY_UNIT
     _attr_device_class = DENSITY_DEVICE_CLASS  # None is OK on older HA versions
 
-    def __init__(self, hass, entry, coord, spool) -> None:
-        super().__init__(hass, entry, coord, spool)
+    def __init__(self, entry, coord, spool_id: int) -> None:
+        super().__init__(entry, coord, spool_id)
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_density"
-        self.async_on_remove(
-            async_dispatcher_connect(self.hass, UPDATE_SIGNAL, self._on_update)
-        )
 
     @property
     def native_value(self):
-        d = (self.coord.data or {}).get(int(self.spool_id)) or {}
-        filament = d.get("filament") or {}
+        filament = self._spool().get("filament") or {}
         val = filament.get("density")
-
         if val is None or val == "":
             return None
-
         try:
             return float(val)
         except (ValueError, TypeError):
             return None
 
 
-class FilmanCountSensor(_BaseFilmanSensor):
-    """Count sourced from filament.count (unitless)."""
-
-    _attr_name = "Count"
+class FilmanQtySensor(_BaseFilmanCoordinatorSensor):
+    """Qty sourced from spool.extra.qty (unitless)."""
+    _attr_name = "Qty"
     _attr_icon = "mdi:counter"
 
-    def __init__(self, hass, entry, coord, spool) -> None:
-        super().__init__(hass, entry, coord, spool)
-        self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_count"
-        self.async_on_remove(
-            async_dispatcher_connect(self.hass, UPDATE_SIGNAL, self._on_update)
-        )
+    def __init__(self, entry, coord, spool_id: int) -> None:
+        super().__init__(entry, coord, spool_id)
+        self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_qty"
 
     @property
     def native_value(self):
-        d = (self.coord.data or {}).get(int(self.spool_id)) or {}
-        filament = d.get("filament") or {}
-        val = filament.get("count")
-
+        val = self._spool().get("qty")
         if val is None or val == "":
             return None
-
         try:
             return int(val)
         except (ValueError, TypeError):
-            # Sometimes APIs send floats/strings; try float->int as a last resort
             try:
                 return int(float(val))
             except (ValueError, TypeError):
                 return None
 
 
-class FilmanHumiditySensor(_BaseFilmanSensor):
+class FilmanHumiditySensor(_BaseFilmanCoordinatorSensor):
     _attr_name = "Humidity"
     _attr_icon = "mdi:water-percent"
     _attr_device_class = SensorDeviceClass.HUMIDITY
 
-    def __init__(self, hass, entry, coord, spool) -> None:
-        super().__init__(hass, entry, coord, spool)
+    def __init__(self, hass: HomeAssistant, entry, coord, spool_id: int) -> None:
+        super().__init__(entry, coord, spool_id)
+        self.hass = hass
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_humidity"
         self._store = hass.data[DOMAIN][entry.entry_id]["store"]
-        self.async_on_remove(
-            async_dispatcher_connect(self.hass, UPDATE_SIGNAL, self._on_update)
-        )
 
     @property
     def native_unit_of_measurement(self):
@@ -238,18 +201,16 @@ class FilmanHumiditySensor(_BaseFilmanSensor):
             return 0
 
 
-class FilmanTemperatureSensor(_BaseFilmanSensor):
+class FilmanTemperatureSensor(_BaseFilmanCoordinatorSensor):
     _attr_name = "Temperature"
     _attr_icon = "mdi:thermometer"
     _attr_device_class = SensorDeviceClass.TEMPERATURE
 
-    def __init__(self, hass, entry, coord, spool) -> None:
-        super().__init__(hass, entry, coord, spool)
+    def __init__(self, hass: HomeAssistant, entry, coord, spool_id: int) -> None:
+        super().__init__(entry, coord, spool_id)
+        self.hass = hass
         self._attr_unique_id = f"{DOMAIN}_{self.spool_id}_temperature"
         self._store = hass.data[DOMAIN][entry.entry_id]["store"]
-        self.async_on_remove(
-            async_dispatcher_connect(self.hass, UPDATE_SIGNAL, self._on_update)
-        )
 
     @property
     def native_unit_of_measurement(self):

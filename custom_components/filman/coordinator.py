@@ -8,9 +8,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import CONF_SPOOLMAN_URL, CONF_SPOOLMAN_API_KEY, DOMAIN, UPDATE_SIGNAL
+from .const import CONF_SPOOLMAN_URL, CONF_SPOOLMAN_API_KEY, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,7 +21,7 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
             hass,
             _LOGGER,
             name=f"{DOMAIN} coordinator",
-            update_interval=timedelta(minutes=5),
+            update_interval=timedelta(minutes=1),
         )
 
     def _base_url(self) -> str | None:
@@ -64,7 +63,6 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
                 headers=headers,
                 json=json_body,
             ) as resp:
-                # Non-2xx -> log body for debugging
                 if resp.status < 200 or resp.status >= 300:
                     body = await resp.text()
                     _LOGGER.warning(
@@ -76,11 +74,9 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
                     )
                     return None
 
-                # 204 = success with no content
                 if resp.status == 204:
                     return {}
 
-                # Try JSON; if not JSON but still success, treat as success
                 try:
                     return await resp.json()
                 except Exception:
@@ -98,57 +94,6 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
 
     async def _async_fetch(self, path: str):
         return await self._async_request("GET", path)
-
-    async def _async_patch(self, path: str, payload: dict):
-        return await self._async_request("PATCH", path, json_body=payload)
-
-    async def async_set_filament_count(self, filament_id: int, count: int) -> bool:
-        """Update filament.extra.count in Spoolman.
-
-        Spoolman treats `extra` as replace-on-write, so we GET first, mutate, then PATCH.
-        """
-        filament = await self._async_fetch(f"/api/v1/filament/{filament_id}")
-        if not isinstance(filament, dict):
-            _LOGGER.warning("Failed to GET filament %s before updating count", filament_id)
-            return False
-
-        extra = filament.get("extra") or {}
-        if not isinstance(extra, dict):
-            extra = {}
-
-        extra["count"] = int(count)
-
-        updated = await self._async_patch(
-            f"/api/v1/filament/{filament_id}",
-            {"extra": extra},
-        )
-        if updated is None:
-            _LOGGER.warning("PATCH filament %s failed when updating extra.count", filament_id)
-            return False
-
-        # Update local coordinator cache for any spools that reference this filament_id
-        data = dict(self.data or {})
-        changed = False
-
-        for sid, sp in data.items():
-            fil = sp.get("filament") or {}
-            if fil.get("id") != filament_id:
-                continue
-
-            fil = dict(fil)
-            fil["count"] = int(count)
-            fil["extra"] = extra
-
-            sp = dict(sp)
-            sp["filament"] = fil
-            data[sid] = sp
-            changed = True
-
-        if changed:
-            self.async_set_updated_data(data)
-            async_dispatcher_send(self.hass, UPDATE_SIGNAL, None)
-
-        return True
 
     async def _async_update_data(self) -> Dict[int, dict]:
         try:
@@ -177,11 +122,14 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
 
             density = fil.get("density")  # g/cm³
 
-            extra = fil.get("extra") or {}
-            if not isinstance(extra, dict):
-                extra = {}
+            spool_extra = sp.get("extra") or {}
+            if not isinstance(spool_extra, dict):
+                spool_extra = {}
 
-            count = extra.get("count")
+            # qty is an EXTRA field on the spool table
+            qty = spool_extra.get("qty")
+            if qty is None:
+                qty = sp.get("qty")
 
             by_id[sid] = {
                 "id": sid,
@@ -190,11 +138,10 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
                 "manufacturer": vendor,
                 "color": color,
                 "filament_type": ftype,
+                "qty": qty,
                 "filament": {
                     "id": filament_id,
                     "density": density,
-                    "count": count,
-                    "extra": extra,
                 },
             }
 
