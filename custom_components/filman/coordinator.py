@@ -95,6 +95,52 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
     async def _async_fetch(self, path: str):
         return await self._async_request("GET", path)
 
+    # ---------------------------
+    # Services support methods
+    # ---------------------------
+
+    async def async_patch_spool(self, spool_id: int, extra: dict | None = None) -> None:
+        """Patch a spool (main use: update spool.extra.* fields)."""
+        payload: dict[str, Any] = {}
+        if extra is not None:
+            if not isinstance(extra, dict):
+                raise UpdateFailed("extra must be a dictionary")
+            payload["extra"] = extra
+
+        resp = await self._async_request("PATCH", f"/api/v1/spool/{spool_id}", json_body=payload)
+        if resp is None:
+            raise UpdateFailed(f"Failed to patch spool {spool_id}")
+
+        # Refresh coordinator so sensors update
+        await self.async_request_refresh()
+
+    async def async_use_spool_filament(
+        self, spool_id: int, use_length: float | None = None, use_weight: float | None = None
+    ) -> None:
+        """Consume filament from a spool."""
+        if use_length is not None and use_weight is not None:
+            raise UpdateFailed("use_length and use_weight cannot both be set")
+
+        payload: dict[str, Any] = {}
+        if use_length is not None:
+            payload["use_length"] = use_length
+        if use_weight is not None:
+            payload["use_weight"] = use_weight
+
+        if not payload:
+            raise UpdateFailed("Must provide use_length or use_weight")
+
+        resp = await self._async_request("PUT", f"/api/v1/spool/{spool_id}/use", json_body=payload)
+        if resp is None:
+            raise UpdateFailed(f"Failed to use filament on spool {spool_id}")
+
+        # Refresh coordinator so sensors update
+        await self.async_request_refresh()
+
+    # ---------------------------
+    # Coordinator data refresh
+    # ---------------------------
+
     async def _async_update_data(self) -> Dict[int, dict]:
         try:
             data = await self._async_fetch("/api/v1/spool?archived=false")
