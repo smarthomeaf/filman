@@ -31,10 +31,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _svc_patch_spool(call: ServiceCall) -> None:
         spool_id: int = call.data["id"]
-        extra = call.data.get("extra")
+        data = {key: call.data[key] for key in call.data if key != "id"}
+
+        if not data:
+            raise HomeAssistantError("No fields provided to patch (ex: extra: {qty: 5})")
 
         try:
-            await coord.async_patch_spool(spool_id, extra=extra)
+            await coord.async_patch_spool(spool_id, data)
         except Exception as e:
             raise HomeAssistantError(f"filman.patch_spool failed: {e}") from e
 
