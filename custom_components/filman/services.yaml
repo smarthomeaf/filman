@@ -1,53 +1,81 @@
 patch_spool:
-  name: Patch Spool
-  description: Patch a Spoolman spool object (e.g., update extra.qty).
+  name: "Patch Spool"
+  description: "A custom service to patch spool data"
   fields:
     id:
-      name: Spool ID
-      description: The ID of the spool in Spoolman.
-      required: true
+      name: "ID"
+      description: "The ID of the spool"
       example: 123
-      selector:
-        number:
-          min: 1
-          mode: box
+      required: true
+    first_used:
+      name: "First Used"
+      description: "The first time the spool was used"
+      example: "2019-08-24T14:15:22Z"
+    last_used:
+      name: "Last Used"
+      description: "The last time the spool was used"
+      example: "2019-08-24T14:15:22Z"
+    filament_id:
+      name: "Filament ID"
+      description: "The ID of the filament used in the spool"
+      example: 0
+    price:
+      name: "Price"
+      description: "The price of the spool"
+      example: 20.0
+    initial_weight:
+      name: "Initial Weight"
+      description: "The initial weight of the spool including filament"
+      example: 200.0
+    spool_weight:
+      name: "Spool Weight"
+      description: "The weight of the empty spool"
+      example: 200.0
+    remaining_weight:
+      name: "Remaining Weight"
+      description: "The remaining weight of the filament on the spool"
+      example: 800.0
+    used_weight:
+      name: "Used Weight"
+      description: "The weight of the filament used from the spool"
+      example: 200.0
+    location:
+      name: "Location"
+      description: "The storage location of the spool"
+      example: "Shelf A"
+    lot_nr:
+      name: "Lot Number"
+      description: "The lot number of the filament"
+      example: "52342"
+    comment:
+      name: "Comment"
+      description: "Any comments about the spool"
+      example: ""
+    archived:
+      name: "Archived"
+      description: "Whether the spool is archived"
+      example: false
     extra:
-      name: Extra
-      description: Extra fields dictionary (e.g. qty).
-      required: false
+      name: "Extra"
+      description: "Any extra properties for the spool"
       example:
-        qty: 5
-      selector:
-        object: {}
+        property1: "string"
+        property2: "string"
 
 use_spool_filament:
-  name: Use Spool Filament
-  description: Consume filament from a spool in Spoolman.
+  name: "Use Spool Filament"
+  description: "Use a weight (or length) of filament for a spool."
   fields:
     id:
-      name: Spool ID
-      description: The ID of the spool in Spoolman.
-      required: true
+      name: "ID"
+      description: "The ID of the spool."
       example: 123
-      selector:
-        number:
-          min: 1
-          mode: box
-    use_length:
-      name: Use Length
-      description: Length to consume (mm). Use either use_length OR use_weight.
-      required: false
-      example: 1500
-      selector:
-        number:
-          min: 0
-          mode: box
+      required: true
     use_weight:
-      name: Use Weight
-      description: Weight to consume (g). Use either use_weight OR use_length.
-      required: false
-      example: 25
-      selector:
-        number:
-          min: 0
-          mode: box
+      name: "Used Weight"
+      description: "The weight of the filament to use from the spool (in g)."
+      example: 10
+    use_length:
+      name: "Used Length"
+      description: "The length of the filament to use from the spool (in mm)."
+      example: 100

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Any
 import logging
+import json
 from datetime import timedelta
 
 from homeassistant.core import HomeAssistant
@@ -99,19 +100,24 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
     # Services support methods
     # ---------------------------
 
-    async def async_patch_spool(self, spool_id: int, extra: dict | None = None) -> None:
-        """Patch a spool (main use: update spool.extra.* fields)."""
-        payload: dict[str, Any] = {}
-        if extra is not None:
-            if not isinstance(extra, dict):
-                raise UpdateFailed("extra must be a dictionary")
-            payload["extra"] = extra
+    async def async_patch_spool(self, spool_id: int, data: dict) -> None:
+        """PATCH a spool with arbitrary fields (including extra).
 
-        resp = await self._async_request("PATCH", f"/api/v1/spool/{spool_id}", json_body=payload)
+        Matches the behavior of the Spoolman HA integration:
+        - forwards all provided fields (except id handled by service)
+        - JSON-encodes each value inside `extra` (Spoolman stores extra as strings)
+        """
+        if not isinstance(data, dict) or not data:
+            raise UpdateFailed("patch_spool requires at least one field to patch")
+
+        if "extra" in data and isinstance(data["extra"], dict):
+            for k, v in list(data["extra"].items()):
+                data["extra"][k] = json.dumps(v)
+
+        resp = await self._async_request("PATCH", f"/api/v1/spool/{spool_id}", json_body=data)
         if resp is None:
             raise UpdateFailed(f"Failed to patch spool {spool_id}")
 
-        # Refresh coordinator so sensors update
         await self.async_request_refresh()
 
     async def async_use_spool_filament(
@@ -134,7 +140,6 @@ class FilmanCoordinator(DataUpdateCoordinator[Dict[int, dict]]):
         if resp is None:
             raise UpdateFailed(f"Failed to use filament on spool {spool_id}")
 
-        # Refresh coordinator so sensors update
         await self.async_request_refresh()
 
     # ---------------------------
