@@ -1,0 +1,53 @@
+patch_spool:
+  name: Patch Spool
+  description: Patch a Spoolman spool object (e.g., update extra.qty).
+  fields:
+    id:
+      name: Spool ID
+      description: The ID of the spool in Spoolman.
+      required: true
+      example: 123
+      selector:
+        number:
+          min: 1
+          mode: box
+    extra:
+      name: Extra
+      description: Extra fields dictionary (e.g. qty).
+      required: false
+      example:
+        qty: 5
+      selector:
+        object: {}
+
+use_spool_filament:
+  name: Use Spool Filament
+  description: Consume filament from a spool in Spoolman.
+  fields:
+    id:
+      name: Spool ID
+      description: The ID of the spool in Spoolman.
+      required: true
+      example: 123
+      selector:
+        number:
+          min: 1
+          mode: box
+    use_length:
+      name: Use Length
+      description: Length to consume (mm). Use either use_length OR use_weight.
+      required: false
+      example: 1500
+      selector:
+        number:
+          min: 0
+          mode: box
+    use_weight:
+      name: Use Weight
+      description: Weight to consume (g). Use either use_weight OR use_length.
+      required: false
+      example: 25
+      selector:
+        number:
+          min: 0
+          mode: box
